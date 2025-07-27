@@ -1,0 +1,235 @@
+﻿zabbix_export:
+  version: '7.2'
+  template_groups:
+    - uuid: f1978336f4e84d2f8a23796b8a04bfe6
+      name: 'Templates ZBX'
+  templates:
+    - uuid: 0823a03ce73c40baa7ed9cc3054f755f
+      template: 'Template UniFi Controller'
+      name: 'Template UniFi Controller'
+      description: 'Шаблон для мониторинга устройств UniFi Controller через API с использованием API-ключа. Установите макрос {$UNIFI_API_KEY} для аутентификации. Укажите IP контроллера (например, 192.168.2.103) в {HOST.CONN}.'
+      groups:
+        - name: 'Templates ZBX'
+      items:
+        - uuid: 9fd8dc2e9bca44799d40d47798d5d88f
+          name: 'Обнаружение устройств UniFi'
+          type: SCRIPT
+          key: unifi.devices
+          delay: 5m
+          history: 7d
+          tags:
+            - tag: Application
+              value: UniFi
+          trends: '0'
+          value_type: TEXT
+          params: |
+            var cfg = JSON.parse(value);
+            var host = cfg.host;
+            var apiKey = cfg.apiKey;
+
+            var req = new HttpRequest();
+            req.addHeader("Accept: application/json");
+            req.addHeader("X-API-KEY: " + apiKey);
+
+            // Получение данных об устройствах
+            Zabbix.log(4, "Requesting devices from: https://" + host + "/proxy/network/api/s/default/stat/device");
+            var dataResp = req.get("https://" + host + "/proxy/network/api/s/default/stat/device");
+            Zabbix.log(4, "Devices response: " + dataResp + ", Status: " + req.getStatus());
+
+            if (req.getStatus() !== 200) {
+              throw "Ошибка запроса: HTTP " + req.getStatus() + " - " + dataResp;
+            }
+
+            try {
+              dataResp = JSON.parse(dataResp);
+            } catch (e) {
+              throw "Некорректный JSON-ответ: " + e;
+            }
+
+            // Проверка структуры ответа
+            if (!dataResp.data) {
+              throw "Отсутствует поле 'data' в ответе API";
+            }
+
+            // Добавление num_sta: 0 для устройств, у которых поле отсутствует
+            dataResp.data.forEach(function(device) {
+              if (!device.hasOwnProperty('num_sta')) {
+                device.num_sta = 0;
+              }
+            });
+
+            // Возврат списка устройств
+            return JSON.stringify(dataResp.data);
+          parameters:
+            - name: host
+              value: "{HOST.CONN}"
+            - name: apiKey
+              value: "{$UNIFI_API_KEY}"
+        - uuid: aace83a5186649b39000dcb27edac383
+          name: 'Актуальная версия UniFi'
+          type: SCRIPT
+          key: unifi.up2dateVersion
+          delay: 60m
+          history: 30d
+          tags:
+            - tag: Application
+              value: UniFi
+          trends: '0'
+          value_type: CHAR
+          params: |
+            var obj = JSON.parse(value);
+            url = obj.url;
+            
+            var response, login = new HttpRequest();
+            login.addHeader('Content-Type: application/x-www-form-urlencoded');
+            try {
+              response = login.get(url);
+              response = JSON.parse(response);
+            }
+            catch (error) {
+              throw 'Нет JSON-ответа';
+            }
+            firmware = response._embedded.firmware[0];
+            result = firmware.version_major+"."+firmware.version_minor+"."+firmware.version_patch;
+            return result;
+          description: 'Текущая версия UniFi Controller (Windows) через веб-запрос. Проверьте актуальность URL.'
+          parameters:
+            - name: url
+              value: '{$UNIFI_UPDATEURL}'
+      discovery_rules:
+        - uuid: f16b902954af4c949c1554534f67875f
+          name: 'Обнаружение устройств UniFi'
+          type: DEPENDENT
+          key: unifi.devices.discovery
+          delay: '0'
+          master_item:
+            key: unifi.devices
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var result = [];
+                  var devices = JSON.parse(value);
+                  devices.forEach(function(device) {
+                    result.push({
+                      "{#MAC}": device.mac,
+                      "{#NAME}": device.name || device.model,
+                      "{#MODEL}": device.model
+                    });
+                  });
+                  return JSON.stringify(result);
+          item_prototypes:
+            - uuid: 5d095b973cda4dee8fefb3495434cb7d
+              name: 'Устройство UniFi [{#NAME}] Статус'
+              type: DEPENDENT
+              key: 'unifi.devices.status.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              trends: '0'
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].state.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+              trigger_prototypes:
+                - uuid: 188b899999de427d99550e0bc3fb588e
+                  expression: 'last(/Template UniFi Controller/unifi.devices.status.[{#MAC}])<>1'
+                  name: 'Устройство UniFi [{#NAME}] не активно на хосте {HOSTNAME}'
+                  priority: HIGH
+            - uuid: e41cfb4509d54395be1e51d142128f22
+              name: 'Устройство UniFi [{#NAME}] Время работы'
+              type: DEPENDENT
+              key: 'unifi.devices.uptime.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              units: uptime
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].uptime.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+            - uuid: c87db04ca4b04a24a3ce655cfa5df676
+              name: 'Устройство UniFi [{#NAME}] IP-адрес'
+              type: DEPENDENT
+              key: 'unifi.devices.ip.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              trends: '0'
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].ip.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+            - uuid: 601b502606d5493bb46852e3f9181bd5
+              name: 'Устройство UniFi [{#NAME}] Версия прошивки'
+              type: DEPENDENT
+              key: 'unifi.devices.version.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              trends: '0'
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].version.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+              trigger_prototypes:
+                - uuid: 7bcf5b73ccc34b7e9cb6bb61149cbfc2
+                  expression: 'last(/Template UniFi Controller/unifi.up2dateVersion)<>last(/Template UniFi Controller/unifi.devices.version.[{#MAC}])'
+                  name: 'Ожидается обновление прошивки устройства UniFi [{#NAME}] на хосте {HOSTNAME}'
+                  priority: WARNING
+            - uuid: 2417dbe0669d4bbc837dd65293a83ef4
+              name: 'Устройство UniFi [{#NAME}] Модель'
+              type: DEPENDENT
+              key: 'unifi.devices.model.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              trends: '0'
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].model.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+            - uuid: 0b2ff88fc62b4af1b787c0fac09eb9dc
+              name: 'Устройство UniFi [{#NAME}] Подключённые клиенты'
+              type: DEPENDENT
+              key: 'unifi.devices.clients.[{#MAC}]'
+              delay: '0'
+              history: 30d
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.[?(@.mac==''{#MAC}'')].num_sta.first()'
+              master_item:
+                key: unifi.devices
+              tags:
+                - tag: Application
+                  value: UniFi
+      macros:
+        - macro: '{$UNIFI_API_KEY}'
+          value: 'your_api_key_here'
+        - macro: '{$UNIFI_UPDATEURL}'
+          value: 'https://fw-update.ubnt.com/api/firmware-latest?filter=eq~~product~~unifi-controller&filter=eq~~channel~~release&filter=eq~~platform~~windows'
